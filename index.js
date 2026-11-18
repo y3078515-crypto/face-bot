@@ -25,8 +25,11 @@ try {
   console.error('Ошибка чтения celebrities.json:', e);
 }
 
-// Хранилище лимитов пользователей в памяти (айди пользователя -> количество оставшихся попыток)
-const userLimits = {};
+// Хранилища в памяти
+const userLimits = {};      // id пользователя -> оставшиеся попытки
+const waitingForPhoto = {}; // id пользователя -> категория, которую он ждет ('general', 'singers', etc.)
+const photoCache = {};      // file_id фото -> индекс персонажа в базе (чтобы одно и то же фото давало того же актера)
+
 const MAX_ATTEMPTS = 5;
 
 function checkLimit(userId) {
@@ -46,26 +49,45 @@ const mainMenu = Markup.keyboard([
 // Команда /start
 bot.start((ctx) => {
   const userId = ctx.from.id;
+  waitingForPhoto[userId] = null;
   const attempts = checkLimit(userId);
   ctx.reply(
-    `👋 Привет! Добро пожаловать в сервис подбора знаменитостей.\n\n📸 <b>Скинь свою фотографию (селфи)</b> в чат, и бот подберет похожего актера!\n\n🎁 Бесплатный лимит: <b>${attempts} из ${MAX_ATTEMPTS} попыток</b> осталось.`,
+    `👋 Привет! Добро пожаловать в сервис поиска двойников.\n\n👇 Нажми категорию в меню (например, «🎬 Кино и Актеры»), после чего бот попросит прислать фото.`,
     { parse_mode: 'HTML', ...mainMenu }
   );
 });
 
 bot.hears('🏠 Главное меню', (ctx) => {
   const userId = ctx.from.id;
+  waitingForPhoto[userId] = null;
   const attempts = checkLimit(userId);
   ctx.reply(`🏠 Главное меню.\nОсталось попыток: <b>${attempts} из ${MAX_ATTEMPTS}</b>`, { parse_mode: 'HTML', ...mainMenu });
 });
 
-// Кнопки категорий
+// Кнопка «Кино и Актеры» — теперь она просит фото!
 bot.hears('🎬 Кино и Актеры', (ctx) => {
-  tryUseAttempt(ctx, 'general', '🎬 Кино и Актеры');
+  const userId = ctx.from.id;
+  const attempts = checkLimit(userId);
+
+  if (attempts <= 0) {
+    return ctx.reply('❌ У вас закончились бесплатные попытки (5/5). Нажмите «⭐ Пополнить лимит»!', mainMenu);
+  }
+
+  waitingForPhoto[userId] = 'general';
+  ctx.reply('📸 <b>Жду ваше фото!</b> Отправьте селфи или картинку в чат, чтобы узнать своего двойника из мира кино.', { parse_mode: 'HTML', ...mainMenu });
 });
 
+// Кнопка «Певцы и Музыка» — тоже просит фото
 bot.hears('🎤 Певцы и Музыка', (ctx) => {
-  tryUseAttempt(ctx, 'singers', '🎤 Певцы и Музыка');
+  const userId = ctx.from.id;
+  const attempts = checkLimit(userId);
+
+  if (attempts <= 0) {
+    return ctx.reply('❌ У вас закончились бесплатные попытки (5/5). Нажмите «⭐ Пополнить лимит»!', mainMenu);
+  }
+
+  waitingForPhoto[userId] = 'singers';
+  ctx.reply('📸 <b>Жду ваше фото!</b> Отправьте картинку в чат для подбора музыкального исполнителя.', { parse_mode: 'HTML', ...mainMenu });
 });
 
 bot.hears('🔞 18+ Звезды', (ctx) => {
@@ -102,86 +124,77 @@ bot.on('successful_payment', (ctx) => {
   ctx.reply(`✅ Оплата прошла успешно! Ваш лимит пополнен до ${MAX_ATTEMPTS} попыток.`, mainMenu);
 });
 
-// Проверка лимита и выдача персонажа
-function tryUseAttempt(ctx, categoryKey, categoryName) {
-  const userId = ctx.from.id;
-  const attempts = checkLimit(userId);
-
-  if (attempts <= 0) {
-    return ctx.reply('❌ У вас закончились бесплатные попытки (лимит 5 фото/запросов). Нажмите «⭐ Пополнить лимит», чтобы продолжить!', mainMenu);
-  }
-
-  // Списываем 1 попытку
-  userLimits[userId] -= 1;
-  sendRandomCelebrity(ctx, categoryKey, categoryName);
-}
-
-// Функция отправки персонажа
-function sendRandomCelebrity(ctx, categoryKey, categoryName) {
-  const list = db[categoryKey];
-  if (!list || list.length === 0) {
-    return ctx.reply(`⚠️ В категории "${categoryName}" пока пусто.`);
-  }
-  
-  const celeb = list[Math.floor(Math.random() * list.length)];
-  const userId = ctx.from.id;
-  const attempts = userLimits[userId];
-
-  const caption = `<b>⭐ Похожий персонаж: ${celeb.name}</b>\n\n📝 ${celeb.desc}\n\n📂 Категория: <i>${categoryName}</i>\n📉 Осталось попыток: <b>${attempts}/${MAX_ATTEMPTS}</b>`;
-
-  const inlineKeyboard = Markup.inlineKeyboard([
-    [Markup.button.url('🔗 Читать на Wikipedia', celeb.link)],
-    [Markup.button.callback('🔄 Искать еще', `next_${categoryKey}`)]
-  ]);
-
-  if (celeb.photo && celeb.photo.startsWith('http')) {
-    ctx.replyWithPhoto(celeb.photo, { caption: caption, parse_mode: 'HTML', ...inlineKeyboard }).catch(() => {
-      ctx.reply(caption, { parse_mode: 'HTML', ...inlineKeyboard });
-    });
-  } else {
-    ctx.reply(caption, { parse_mode: 'HTML', ...inlineKeyboard });
-  }
-}
-
-// Кнопка «Искать еще» под сообщением
-bot.action(/next_(.+)/, (ctx) => {
-  const userId = ctx.from.id;
-  const attempts = checkLimit(userId);
-
-  if (attempts <= 0) {
-    return ctx.reply('❌ Лимит попыток исчерпан! Пополните баланс.');
-  }
-
-  userLimits[userId] -= 1;
-  const categoryKey = ctx.match[1];
-  let categoryName = 'Категория';
-  if (categoryKey === 'general') categoryName = '🎬 Кино и Актеры';
-  if (categoryKey === 'singers') categoryName = '🎤 Певцы и Музыка';
-  if (categoryKey === 'adult') categoryName = '🔞 18+ Звезды';
-
-  ctx.answerCbQuery('Ищем совпадение...');
-  sendRandomCelebrity(ctx, categoryKey, categoryName);
-});
-
-// ГЛАВНАЯ ФИШКА: Обработка отправленной фотографии пользователя (Фейс-матчинг)
+// ОБРАБОТКА ФОТОГРАФИИ ОТ ПОЛЬЗОВАТЕЛЯ
 bot.on('photo', (ctx) => {
   const userId = ctx.from.id;
   const attempts = checkLimit(userId);
 
   if (attempts <= 0) {
-    return ctx.reply('❌ Лимит бесплатных фотографий исчерпан (5/5). Пополните баланс через меню!', mainMenu);
+    waitingForPhoto[userId] = null;
+    return ctx.reply('❌ Лимит бесплатных попыток исчерпан (5/5). Пополните баланс через меню!', mainMenu);
   }
 
-  ctx.reply('🔍 <b>Анализируем ваше лицо, сопоставляем черты с базой актеров...</b>', { parse_mode: 'HTML' });
+  // Если пользователь прислал фото просто так, без выбора категории — по умолчанию берем кино
+  const categoryKey = waitingForPhoto[userId] || 'general';
+  const list = db[categoryKey];
+
+  if (!list || list.length === 0) {
+    return ctx.reply('⚠️ В базе данных нет записей для этой категории.');
+  }
+
+  // Берем уникальный file_id фотографии (или берем file_unique_id)
+  const photoObj = ctx.message.photo[ctx.message.photo.length - 1];
+  const fileUniqueId = photoObj.file_unique_id;
+
+  let celebIndex;
+
+  // Если такое фото уже присылали, закрепляем за ним того же персонажа!
+  if (photoCache[fileUniqueId] !== undefined) {
+    celebIndex = photoCache[fileUniqueId];
+  } else {
+    // Если фото новое, выбираем случайного персонажа и запоминаем для этого фото
+    celebIndex = Math.floor(Math.random() * list.length);
+    photoCache[fileUniqueId] = celebIndex;
+    
+    // Списываем попытку только за НОВОЕ уникальное фото
+    userLimits[userId] -= 1;
+  }
+
+  const celeb = list[celebIndex];
+  const currentAttempts = userLimits[userId];
+  const categoryName = categoryKey === 'singers' ? '🎤 Певцы и Музыка' : '🎬 Кино и Актеры';
+
+  ctx.reply('🔍 <b>Анализируем черты лица, сканируем биометрию...</b>', { parse_mode: 'HTML' });
 
   setTimeout(() => {
-    // Списываем попытку за анализ фото
-    userLimits[userId] -= 1;
-    // Выдаем случайного актера из категории кино
-    sendRandomCelebrity(ctx, 'general', '🎬 Кино и Актеры (Похожий актер)');
-  }, 1500);
+    const caption = `<b>⭐ Ваш двойник: ${celeb.name}</b>\n\n📝 ${celeb.desc}\n\n📂 Категория: <i>${categoryName}</i>\n📉 Осталось попыток: <b>${currentAttempts}/${MAX_ATTEMPTS}</b>`;
+
+    const inlineKeyboard = Markup.inlineKeyboard([
+      [Markup.button.url('🔗 Читать на Wikipedia', celeb.link)],
+      [Markup.button.callback('🔄 Сбросить режим', 'reset_mode')]
+    ]);
+
+    if (celeb.photo && celeb.photo.startsWith('http')) {
+      ctx.replyWithPhoto(celeb.photo, { caption: caption, parse_mode: 'HTML', ...inlineKeyboard }).catch(() => {
+        ctx.reply(caption, { parse_mode: 'HTML', ...inlineKeyboard });
+      });
+    } else {
+      ctx.reply(caption, { parse_mode: 'HTML', ...inlineKeyboard });
+    }
+
+    // Сбрасываем статус ожидания фото для этого юзера
+    waitingForPhoto[userId] = null;
+  }, 1200);
 });
 
-bot.launch().then(() => console.log('Бот с лимитами и фото успешно запущен!'));
+// Кнопка сброса режима под сообщением
+bot.action('reset_mode', (ctx) => {
+  const userId = ctx.from.id;
+  waitingForPhoto[userId] = null;
+  ctx.answerCbQuery('Режим сброшен');
+  ctx.reply('Выберите категорию в меню ниже 👇', mainMenu);
+});
+
+bot.launch().then(() => console.log('Бот с привязкой фото успешно запущен!'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
