@@ -3,8 +3,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "canvas": "^3.2.3",
-    "face-api.js": "^0.22.2",
+    "express": "^4.19.2",
     "telegraf": "^4.16.3"
   }
 }
