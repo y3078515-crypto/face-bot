@@ -1,4 +1,7 @@
 {
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "canvas": "^3.2.3",
     "face-api.js": "^0.22.2",
